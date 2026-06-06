@@ -45,7 +45,7 @@ fun SplashScreen(
 
     LaunchedEffect(Unit) {
         repository.initSession()
-        delay(1500)
+        delay(2000)
         onNavigate(repository.sessionManager.isLoggedIn)
     }
 

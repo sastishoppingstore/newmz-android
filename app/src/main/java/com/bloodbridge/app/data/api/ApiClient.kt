@@ -12,7 +12,6 @@ import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.logging.HttpLoggingInterceptor
 import java.io.File
-import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
@@ -26,11 +25,8 @@ object ApiClient {
 
     val client: OkHttpClient by lazy {
         val logging = HttpLoggingInterceptor().apply {
-            level = if (BuildConfig.DEBUG) {
-                HttpLoggingInterceptor.Level.BODY
-            } else {
-                HttpLoggingInterceptor.Level.NONE
-            }
+            level = if (BuildConfig.DEBUG) HttpLoggingInterceptor.Level.BODY
+            else HttpLoggingInterceptor.Level.NONE
         }
 
         OkHttpClient.Builder()
@@ -41,7 +37,6 @@ object ApiClient {
                 override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
                     cookieStore[url.host] = cookies
                 }
-
                 override fun loadForRequest(url: HttpUrl): List<Cookie> {
                     return cookieStore[url.host] ?: emptyList()
                 }
@@ -50,65 +45,79 @@ object ApiClient {
             .addInterceptor { chain ->
                 val original = chain.request()
                 val builder = original.newBuilder()
-
-                val token = sessionManager.csrfToken
-                if (!token.isNullOrEmpty()) {
-                    builder.addHeader("X-CSRF-Token", token)
+                builder.addHeader("User-Agent", "MZBloodBridge-Android/1.0")
+                sessionManager.csrfToken?.let {
+                    builder.addHeader("X-CSRF-Token", it)
                 }
-                builder.addHeader("X-Requested-With", "XMLHttpRequest")
-
                 chain.proceed(builder.build())
             }
             .build()
     }
 
-    suspend fun getCsrfToken(): Result<String> {
+    private suspend fun getCsrfFromHtml(): String? {
         return try {
             val response = client.newCall(
                 okhttp3.Request.Builder()
-                    .url("${BASE_URL}api/mobile/auth.php?action=csrf")
+                    .url(BASE_URL)
                     .get()
                     .build()
             ).execute()
-
-            val body = response.body?.string() ?: return Result.failure(Exception("Empty response"))
-
-            val json = org.json.JSONObject(body)
-            val token = json.optString("csrf_token")
-            val loggedIn = json.optBoolean("logged_in", false)
-
-            if (token.isNotEmpty()) {
-                sessionManager.csrfToken = token
-                sessionManager.isLoggedIn = loggedIn
-                Result.success(token)
-            } else {
-                Result.failure(Exception("No CSRF token"))
-            }
+            val body = response.body?.string() ?: return null
+            val regex = Regex("""name="csrf_token" value="([a-f0-9]+)"""")
+            regex.find(body)?.groupValues?.getOrNull(1)
         } catch (e: Exception) {
-            Result.failure(e)
+            null
         }
+    }
+
+    suspend fun initSession() {
+        try {
+            val token = getCsrfFromHtml()
+            if (!token.isNullOrEmpty()) {
+                sessionManager.csrfToken = token
+            }
+        } catch (_: Exception) {}
     }
 
     suspend fun login(email: String, password: String): Result<org.json.JSONObject> {
         return try {
-            getCsrfToken()
+            initSession()
 
-            val formBody = "email=${java.net.URLEncoder.encode(email, "UTF-8")}&password=${java.net.URLEncoder.encode(password, "UTF-8")}&csrf_token=${sessionManager.csrfToken ?: ""}"
+            val formBody = StringBuilder()
+            formBody.append("email=${java.net.URLEncoder.encode(email, "UTF-8")}")
+            formBody.append("&password=${java.net.URLEncoder.encode(password, "UTF-8")}")
 
             val response = client.newCall(
                 okhttp3.Request.Builder()
-                    .url("${BASE_URL}api/mobile/auth.php?action=login")
-                    .post(formBody.toRequestBody(FORM_MEDIA))
+                    .url("${BASE_URL}login.php")
+                    .post(formBody.toString().toRequestBody(FORM_MEDIA))
+                    .addHeader("X-Requested-With", "XMLHttpRequest")
                     .build()
             ).execute()
 
             val body = response.body?.string() ?: return Result.failure(Exception("Empty response"))
-            val json = org.json.JSONObject(body)
 
-            if (json.optBoolean("success")) {
-                Result.success(json)
+            if (body.contains("alert-error") || body.contains("alert alert-error")) {
+                val errorMatch = Regex("""alert-error[^>]*>([^<]+)""").find(body)
+                val errorMsg = errorMatch?.groupValues?.getOrNull(1)?.trim() ?: "Login failed"
+                Result.failure(Exception(errorMsg))
             } else {
-                Result.failure(Exception(json.optString("error", "Login failed")))
+                val nameMatch = Regex("""Welcome back, ([^!]+)""").find(body)
+                val nameFromResponse = nameMatch?.groupValues?.getOrNull(1)
+
+                val json = org.json.JSONObject().apply {
+                    put("success", true)
+                    nameFromResponse?.let { put("name", it.trim()) }
+                }
+                sessionManager.isLoggedIn = true
+                nameFromResponse?.let { sessionManager.userName = it.trim() }
+
+                val userJson = org.json.JSONObject()
+                sessionManager.userEmail?.let { userJson.put("email", it) }
+                nameFromResponse?.let { userJson.put("name", it.trim()) }
+                json.put("user", userJson)
+
+                Result.success(json)
             }
         } catch (e: Exception) {
             Result.failure(e)
@@ -116,33 +125,18 @@ object ApiClient {
     }
 
     suspend fun register(
-        name: String,
-        email: String,
-        password: String,
-        confirmPassword: String,
-        phone: String,
-        bloodGroup: String,
-        city: String,
-        cnic: String,
-        gender: String,
-        dob: String,
-        referralCode: String = ""
+        name: String, email: String, password: String, confirmPassword: String,
+        phone: String, bloodGroup: String, city: String, cnic: String,
+        gender: String, dob: String, referralCode: String = ""
     ): Result<org.json.JSONObject> {
         return try {
-            getCsrfToken()
+            initSession()
 
             val params = mutableMapOf(
-                "name" to name,
-                "email" to email,
-                "password" to password,
-                "confirm_password" to confirmPassword,
-                "phone" to phone,
-                "blood_group" to bloodGroup,
-                "city" to city,
-                "cnic" to cnic,
-                "gender" to gender,
-                "dob" to dob,
-                "csrf_token" to (sessionManager.csrfToken ?: "")
+                "name" to name, "email" to email, "password" to password,
+                "confirm_password" to confirmPassword, "phone" to phone,
+                "blood_group" to bloodGroup, "city" to city, "cnic" to cnic,
+                "gender" to gender, "dob" to dob
             )
             if (referralCode.isNotEmpty()) params["referral_code"] = referralCode
 
@@ -152,24 +146,32 @@ object ApiClient {
 
             val response = client.newCall(
                 okhttp3.Request.Builder()
-                    .url("${BASE_URL}api/mobile/auth.php?action=register")
+                    .url("${BASE_URL}register.php")
                     .post(formBody.toRequestBody(FORM_MEDIA))
+                    .addHeader("X-Requested-With", "XMLHttpRequest")
                     .build()
             ).execute()
 
             val body = response.body?.string() ?: return Result.failure(Exception("Empty response"))
-            val json = org.json.JSONObject(body)
 
-            if (json.optBoolean("success")) {
+            if (body.contains("alert-error") || body.contains("alert alert-error")) {
+                val errorMatch = Regex("""alert-error[^>]*>([^<]+)""").find(body)
+                val errorMsg = errorMatch?.groupValues?.getOrNull(1)?.trim() ?: "Registration failed"
+                Result.failure(Exception(errorMsg))
+            } else if (body.contains("Welcome") || body.contains("index.php")) {
+                val json = org.json.JSONObject().apply { put("success", true) }
+                sessionManager.isLoggedIn = true
+                sessionManager.userName = name
+                sessionManager.userEmail = email
+
+                val userJson = org.json.JSONObject().apply {
+                    put("name", name)
+                    put("email", email)
+                }
+                json.put("user", userJson)
                 Result.success(json)
             } else {
-                val errors = json.optJSONArray("errors")
-                val errorMsg = if (errors != null && errors.length() > 0) {
-                    (0 until errors.length()).joinToString("\n") { errors.optString(it) }
-                } else {
-                    json.optString("error", "Registration failed")
-                }
-                Result.failure(Exception(errorMsg))
+                Result.failure(Exception("Registration failed. Please try again."))
             }
         } catch (e: Exception) {
             Result.failure(e)
@@ -177,34 +179,31 @@ object ApiClient {
     }
 
     suspend fun logout(): Result<Boolean> {
-        return try {
-            val response = client.newCall(
-                okhttp3.Request.Builder()
-                    .url("${BASE_URL}api/mobile/auth.php?action=logout")
-                    .post("".toRequestBody(FORM_MEDIA))
-                    .build()
-            ).execute()
-
-            sessionManager.clear()
-            cookieStore.clear()
-            Result.success(true)
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
+        sessionManager.clear()
+        cookieStore.clear()
+        return Result.success(true)
     }
 
     suspend fun getProfile(): Result<org.json.JSONObject> {
         return try {
             val response = client.newCall(
                 okhttp3.Request.Builder()
-                    .url("${BASE_URL}api/mobile/profile.php")
+                    .url("${BASE_URL}profile.php")
                     .get()
                     .build()
             ).execute()
 
             val body = response.body?.string() ?: return Result.failure(Exception("Empty response"))
-            val json = org.json.JSONObject(body)
-            Result.success(json)
+            val json = org.json.JSONObject()
+
+            val nameMatch = Regex("""<h[12][^>]*>([^<]+)</h[12]>""").find(body, 500)
+            nameMatch?.let { json.put("name", it.groupValues[1].trim()) }
+
+            val jsonResult = org.json.JSONObject().apply {
+                put("success", true)
+                put("user", json)
+            }
+            Result.success(jsonResult)
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -217,28 +216,19 @@ object ApiClient {
             if (bloodGroup > 0) urlBuilder.append("&blood_group=$bloodGroup")
 
             val response = client.newCall(
-                okhttp3.Request.Builder()
-                    .url(urlBuilder.toString())
-                    .get()
-                    .build()
+                okhttp3.Request.Builder().url(urlBuilder.toString()).get().build()
             ).execute()
-
-            val body = response.body?.string() ?: return Result.failure(Exception("Empty response"))
-            Result.success(body)
+            Result.success(response.body?.string() ?: "")
         } catch (e: Exception) {
             Result.failure(e)
         }
     }
 
     suspend fun createPost(
-        content: String,
-        type: String = "text",
-        bloodGroup: String? = null,
-        city: String? = null,
-        hospitalName: String? = null,
-        urgency: String = "low",
-        isEmergency: Int = 0,
-        mediaFile: File? = null
+        content: String, type: String = "text",
+        bloodGroup: String? = null, city: String? = null,
+        hospitalName: String? = null, urgency: String = "low",
+        isEmergency: Int = 0, mediaFile: File? = null
     ): Result<org.json.JSONObject> {
         return try {
             val builder = MultipartBody.Builder().setType(MultipartBody.FORM)
@@ -246,8 +236,8 @@ object ApiClient {
                 .addFormDataPart("type", type)
                 .addFormDataPart("is_emergency", isEmergency.toString())
                 .addFormDataPart("urgency", urgency)
-                .addFormDataPart("csrf_token", sessionManager.csrfToken ?: "")
 
+            sessionManager.csrfToken?.let { builder.addFormDataPart("csrf_token", it) }
             bloodGroup?.let { builder.addFormDataPart("blood_group", it) }
             city?.let { builder.addFormDataPart("city", it) }
             hospitalName?.let { builder.addFormDataPart("hospital_name", it) }
@@ -261,30 +251,19 @@ object ApiClient {
                     .post(builder.build())
                     .build()
             ).execute()
-
-            val body = response.body?.string() ?: return Result.failure(Exception("Empty response"))
-            val json = org.json.JSONObject(body)
-            Result.success(json)
+            Result.success(org.json.JSONObject(response.body?.string() ?: "{}"))
         } catch (e: Exception) {
             Result.failure(e)
         }
     }
 
     suspend fun submitEmergencyRequest(
-        patientName: String,
-        bloodGroup: Int,
-        city: String,
-        hospital: String,
-        units: Int,
-        urgency: String,
-        contact: String,
-        attendantName: String,
-        doctorNote: String = "",
-        reportFile: File? = null
+        patientName: String, bloodGroup: Int, city: String, hospital: String,
+        units: Int, urgency: String, contact: String, attendantName: String,
+        doctorNote: String = "", reportFile: File? = null
     ): Result<org.json.JSONObject> {
         return try {
             val builder = MultipartBody.Builder().setType(MultipartBody.FORM)
-                .addFormDataPart("csrf_token", sessionManager.csrfToken ?: "")
                 .addFormDataPart("patient_name", patientName)
                 .addFormDataPart("blood_group", bloodGroup.toString())
                 .addFormDataPart("city", city)
@@ -294,6 +273,7 @@ object ApiClient {
                 .addFormDataPart("contact_number", contact)
                 .addFormDataPart("attendant_name", attendantName)
                 .addFormDataPart("doctor_note", doctorNote)
+            sessionManager.csrfToken?.let { builder.addFormDataPart("csrf_token", it) }
 
             reportFile?.let {
                 builder.addFormDataPart("report_file", it.name, it.readBytes().toRequestBody("application/pdf".toMediaType()))
@@ -305,10 +285,7 @@ object ApiClient {
                     .post(builder.build())
                     .build()
             ).execute()
-
-            val body = response.body?.string() ?: return Result.failure(Exception("Empty response"))
-            val json = org.json.JSONObject(body)
-            Result.success(json)
+            Result.success(org.json.JSONObject(response.body?.string() ?: "{}"))
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -317,12 +294,7 @@ object ApiClient {
     suspend fun getEmergencyRequests(cityId: Int = 0): Result<String> {
         return try {
             val url = if (cityId > 0) "${BASE_URL}api/emergency_request.php?city=$cityId" else "${BASE_URL}api/emergency_request.php"
-            val response = client.newCall(
-                okhttp3.Request.Builder()
-                    .url(url)
-                    .get()
-                    .build()
-            ).execute()
+            val response = client.newCall(okhttp3.Request.Builder().url(url).get().build()).execute()
             Result.success(response.body?.string() ?: "")
         } catch (e: Exception) {
             Result.failure(e)
@@ -332,10 +304,7 @@ object ApiClient {
     suspend fun fetchChats(): Result<String> {
         return try {
             val response = client.newCall(
-                okhttp3.Request.Builder()
-                    .url("${BASE_URL}api/mobile/chats.php")
-                    .get()
-                    .build()
+                okhttp3.Request.Builder().url("${BASE_URL}messages.php").get().build()
             ).execute()
             Result.success(response.body?.string() ?: "")
         } catch (e: Exception) {
@@ -346,10 +315,7 @@ object ApiClient {
     suspend fun fetchMessages(chatId: Int): Result<String> {
         return try {
             val response = client.newCall(
-                okhttp3.Request.Builder()
-                    .url("${BASE_URL}api/chat_fetch.php?chat_id=$chatId")
-                    .get()
-                    .build()
+                okhttp3.Request.Builder().url("${BASE_URL}api/chat_fetch.php?chat_id=$chatId").get().build()
             ).execute()
             Result.success(response.body?.string() ?: "")
         } catch (e: Exception) {
@@ -362,20 +328,15 @@ object ApiClient {
             val jsonBody = org.json.JSONObject().apply {
                 put("chat_id", chatId)
                 put("message", message)
-                put("csrf_token", sessionManager.csrfToken ?: "")
+                sessionManager.csrfToken?.let { put("csrf_token", it) }
             }
-
             val response = client.newCall(
                 okhttp3.Request.Builder()
                     .url("${BASE_URL}api/chat_send.php")
                     .post(jsonBody.toString().toRequestBody(JSON_MEDIA))
                     .build()
             ).execute()
-
-            val body = response.body?.string() ?: return Result.failure(Exception("Empty response"))
-            val json = org.json.JSONObject(body)
-            if (json.optBoolean("success")) Result.success(json)
-            else Result.failure(Exception(json.optString("error", "Failed to send")))
+            Result.success(org.json.JSONObject(response.body?.string() ?: "{}"))
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -387,18 +348,15 @@ object ApiClient {
                 put("post_id", postId)
                 put("action", action)
                 put("reaction_type", reactionType)
-                put("csrf_token", sessionManager.csrfToken ?: "")
+                sessionManager.csrfToken?.let { put("csrf_token", it) }
             }
-
             val response = client.newCall(
                 okhttp3.Request.Builder()
                     .url("${BASE_URL}api/reaction.php")
                     .post(jsonBody.toString().toRequestBody(JSON_MEDIA))
                     .build()
             ).execute()
-
-            val body = response.body?.string() ?: return Result.failure(Exception("Empty response"))
-            Result.success(org.json.JSONObject(body))
+            Result.success(org.json.JSONObject(response.body?.string() ?: "{}"))
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -407,10 +365,7 @@ object ApiClient {
     suspend fun getComments(postId: Int): Result<String> {
         return try {
             val response = client.newCall(
-                okhttp3.Request.Builder()
-                    .url("${BASE_URL}api/comment.php?post_id=$postId")
-                    .get()
-                    .build()
+                okhttp3.Request.Builder().url("${BASE_URL}api/comment.php?post_id=$postId").get().build()
             ).execute()
             Result.success(response.body?.string() ?: "")
         } catch (e: Exception) {
@@ -423,19 +378,16 @@ object ApiClient {
             val jsonBody = org.json.JSONObject().apply {
                 put("post_id", postId)
                 put("content", content)
-                put("csrf_token", sessionManager.csrfToken ?: "")
+                sessionManager.csrfToken?.let { put("csrf_token", it) }
                 parentCommentId?.let { put("parent_comment_id", it) }
             }
-
             val response = client.newCall(
                 okhttp3.Request.Builder()
                     .url("${BASE_URL}api/comment.php")
                     .post(jsonBody.toString().toRequestBody(JSON_MEDIA))
                     .build()
             ).execute()
-
-            val body = response.body?.string() ?: return Result.failure(Exception("Empty response"))
-            Result.success(org.json.JSONObject(body))
+            Result.success(org.json.JSONObject(response.body?.string() ?: "{}"))
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -444,10 +396,7 @@ object ApiClient {
     suspend fun getNotifications(): Result<String> {
         return try {
             val response = client.newCall(
-                okhttp3.Request.Builder()
-                    .url("${BASE_URL}api/notifications.php")
-                    .get()
-                    .build()
+                okhttp3.Request.Builder().url("${BASE_URL}api/notifications.php").get().build()
             ).execute()
             Result.success(response.body?.string() ?: "")
         } catch (e: Exception) {
@@ -458,10 +407,7 @@ object ApiClient {
     suspend fun getUnreadCount(): Result<String> {
         return try {
             val response = client.newCall(
-                okhttp3.Request.Builder()
-                    .url("${BASE_URL}api/notifications_unread.php")
-                    .get()
-                    .build()
+                okhttp3.Request.Builder().url("${BASE_URL}api/notifications_unread.php").get().build()
             ).execute()
             Result.success(response.body?.string() ?: "")
         } catch (e: Exception) {
@@ -471,14 +417,9 @@ object ApiClient {
 
     suspend fun searchDonors(city: String? = null, bloodGroup: String? = null): Result<String> {
         return try {
-            val params = mutableListOf<String>()
-            city?.let { params.add("city=$it") }
-            bloodGroup?.let { params.add("blood_group=$it") }
-            val query = if (params.isNotEmpty()) "?${params.joinToString("&")}" else ""
-
             val response = client.newCall(
                 okhttp3.Request.Builder()
-                    .url("${BASE_URL}api/mobile/donors.php$query")
+                    .url("${BASE_URL}api/search.php?type=donors&city=${city?.let { java.net.URLEncoder.encode(it, "UTF-8") } ?: ""}&blood_group=${bloodGroup ?: ""}")
                     .get()
                     .build()
             ).execute()
@@ -492,11 +433,11 @@ object ApiClient {
         return try {
             val response = client.newCall(
                 okhttp3.Request.Builder()
-                    .url("${BASE_URL}api/mobile/metadata.php")
+                    .url("${BASE_URL}api/feed.php?limit=1")
                     .get()
                     .build()
             ).execute()
-            Result.success(response.body?.string() ?: "")
+            Result.success(response.body?.string() ?: "{}")
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -506,7 +447,7 @@ object ApiClient {
         return try {
             val jsonBody = org.json.JSONObject().apply {
                 put("post_id", postId)
-                put("csrf_token", sessionManager.csrfToken ?: "")
+                sessionManager.csrfToken?.let { put("csrf_token", it) }
             }
             val response = client.newCall(
                 okhttp3.Request.Builder()
@@ -514,7 +455,6 @@ object ApiClient {
                     .post(jsonBody.toString().toRequestBody(JSON_MEDIA))
                     .build()
             ).execute()
-
             Result.success(org.json.JSONObject(response.body?.string() ?: "{}"))
         } catch (e: Exception) {
             Result.failure(e)
@@ -525,7 +465,7 @@ object ApiClient {
         return try {
             val jsonBody = org.json.JSONObject().apply {
                 put("post_id", postId)
-                put("csrf_token", sessionManager.csrfToken ?: "")
+                sessionManager.csrfToken?.let { put("csrf_token", it) }
             }
             val response = client.newCall(
                 okhttp3.Request.Builder()
@@ -533,7 +473,6 @@ object ApiClient {
                     .post(jsonBody.toString().toRequestBody(JSON_MEDIA))
                     .build()
             ).execute()
-
             Result.success(org.json.JSONObject(response.body?.string() ?: "{}"))
         } catch (e: Exception) {
             Result.failure(e)
@@ -555,13 +494,9 @@ object ApiClient {
     }
 
     suspend fun requestDonor(
-        donorId: Int,
-        patientName: String,
-        hospital: String,
-        contactNumber: String,
-        urgency: String = "medium",
-        requiredDate: String? = null,
-        message: String? = null
+        donorId: Int, patientName: String, hospital: String,
+        contactNumber: String, urgency: String = "medium",
+        requiredDate: String? = null, message: String? = null
     ): Result<org.json.JSONObject> {
         return try {
             val jsonBody = org.json.JSONObject().apply {
@@ -570,7 +505,7 @@ object ApiClient {
                 put("hospital", hospital)
                 put("contact_number", contactNumber)
                 put("urgency", urgency)
-                put("csrf_token", sessionManager.csrfToken ?: "")
+                sessionManager.csrfToken?.let { put("csrf_token", it) }
                 requiredDate?.let { put("required_date", it) }
                 message?.let { put("message", it) }
             }
@@ -580,7 +515,6 @@ object ApiClient {
                     .post(jsonBody.toString().toRequestBody(JSON_MEDIA))
                     .build()
             ).execute()
-
             Result.success(org.json.JSONObject(response.body?.string() ?: "{}"))
         } catch (e: Exception) {
             Result.failure(e)

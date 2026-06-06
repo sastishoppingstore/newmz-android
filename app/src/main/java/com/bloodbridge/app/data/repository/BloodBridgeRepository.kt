@@ -18,10 +18,9 @@ class BloodBridgeRepository(
         ApiClient.sessionManager = sessionManager
     }
 
-    suspend fun initSession(): Result<Boolean> {
-        return withContext(Dispatchers.IO) {
-            val result = ApiClient.getCsrfToken()
-            result.map { true }
+    suspend fun initSession() {
+        withContext(Dispatchers.IO) {
+            ApiClient.initSession()
         }
     }
 
