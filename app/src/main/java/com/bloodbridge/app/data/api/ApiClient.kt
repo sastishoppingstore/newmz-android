@@ -198,40 +198,6 @@ object ApiClient {
         }
     }
 
-            val response = client.newCall(
-                okhttp3.Request.Builder()
-                    .url("${BASE_URL}register.php")
-                    .post(formBody.toRequestBody(FORM_MEDIA))
-                    .addHeader("X-Requested-With", "XMLHttpRequest")
-                    .build()
-            ).execute()
-
-            val body = response.body?.string() ?: return Result.failure(Exception("Empty response"))
-
-            if (body.contains("alert-error") || body.contains("alert alert-error")) {
-                val errorMatch = Regex("""alert-error[^>]*>([^<]+)""").find(body)
-                val errorMsg = errorMatch?.groupValues?.getOrNull(1)?.trim() ?: "Registration failed"
-                Result.failure(Exception(errorMsg))
-            } else if (body.contains("Welcome") || body.contains("index.php")) {
-                val json = org.json.JSONObject().apply { put("success", true) }
-                sessionManager.isLoggedIn = true
-                sessionManager.userName = name
-                sessionManager.userEmail = email
-
-                val userJson = org.json.JSONObject().apply {
-                    put("name", name)
-                    put("email", email)
-                }
-                json.put("user", userJson)
-                Result.success(json)
-            } else {
-                Result.failure(Exception("Registration failed. Please try again."))
-            }
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
-
     suspend fun logout(): Result<Boolean> {
         sessionManager.clear()
         cookieStore.clear()
