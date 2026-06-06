@@ -119,7 +119,7 @@ fun ChatScreen(
                             ),
                             color = if (isMe) BloodRed else GrayLight
                         ) {
-                            Column(modifier = Modifier.padding(12.dp).maxWidth(280.dp)) {
+                            Column(modifier = Modifier.padding(12.dp).widthIn(max = 280.dp)) {
                                 Text(
                                     msg.content,
                                     color = if (isMe) White else OnSurface,

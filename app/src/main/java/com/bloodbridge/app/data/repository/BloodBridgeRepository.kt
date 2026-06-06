@@ -10,7 +10,7 @@ import org.json.JSONObject
 import java.io.File
 
 class BloodBridgeRepository(
-    private val sessionManager: SessionManager
+    val sessionManager: SessionManager
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
