@@ -63,8 +63,8 @@ object ApiClient {
                     .build()
             ).execute()
             val body = response.body?.string() ?: return null
-            val regex = Regex("""name="csrf_token" value="([a-f0-9]+)"""")
-            regex.find(body)?.groupValues?.getOrNull(1)
+            val metaRegex = Regex("""<meta name="csrf-token" content="([a-f0-9]+)">""")
+            metaRegex.find(body)?.groupValues?.getOrNull(1)
         } catch (e: Exception) {
             null
         }
@@ -87,7 +87,12 @@ object ApiClient {
             formBody.append("email=${java.net.URLEncoder.encode(email, "UTF-8")}")
             formBody.append("&password=${java.net.URLEncoder.encode(password, "UTF-8")}")
 
-            val response = client.newCall(
+            val loginClient = client.newBuilder()
+                .followRedirects(false)
+                .followSslRedirects(false)
+                .build()
+
+            val response = loginClient.newCall(
                 okhttp3.Request.Builder()
                     .url("${BASE_URL}login.php")
                     .post(formBody.toString().toRequestBody(FORM_MEDIA))
@@ -95,29 +100,39 @@ object ApiClient {
                     .build()
             ).execute()
 
-            val body = response.body?.string() ?: return Result.failure(Exception("Empty response"))
+            val code = response.code
+            val location = response.header("Location")
 
-            if (body.contains("alert-error") || body.contains("alert alert-error")) {
-                val errorMatch = Regex("""alert-error[^>]*>([^<]+)""").find(body)
-                val errorMsg = errorMatch?.groupValues?.getOrNull(1)?.trim() ?: "Login failed"
-                Result.failure(Exception(errorMsg))
-            } else {
-                val nameMatch = Regex("""Welcome back, ([^!]+)""").find(body)
-                val nameFromResponse = nameMatch?.groupValues?.getOrNull(1)
+            if (code in 300..399 && location != null) {
+                // Redirect = login success
+                sessionManager.isLoggedIn = true
+                sessionManager.userEmail = email
+
+                // Fetch profile to get user name
+                val profileResp = client.newCall(
+                    okhttp3.Request.Builder()
+                        .url("${BASE_URL}profile.php")
+                        .get()
+                        .build()
+                ).execute()
+                val profileBody = profileResp.body?.string() ?: ""
+                val nameMatch = Regex("""<h[12][^>]*>\s*([^<]+)\s*</h[12]>""").find(profileBody, 500)
+                val userName = nameMatch?.groupValues?.getOrNull(1)?.trim()
 
                 val json = org.json.JSONObject().apply {
                     put("success", true)
-                    nameFromResponse?.let { put("name", it.trim()) }
                 }
-                sessionManager.isLoggedIn = true
-                nameFromResponse?.let { sessionManager.userName = it.trim() }
-
-                val userJson = org.json.JSONObject()
-                sessionManager.userEmail?.let { userJson.put("email", it) }
-                nameFromResponse?.let { userJson.put("name", it.trim()) }
+                val userJson = org.json.JSONObject().apply {
+                    put("email", email)
+                    userName?.let { put("name", it); sessionManager.userName = it }
+                }
                 json.put("user", userJson)
-
                 Result.success(json)
+            } else {
+                val body = response.body?.string() ?: ""
+                val errorMatch = Regex("""alert-error[^>]*>\s*([^<]+)""").find(body)
+                val errorMsg = errorMatch?.groupValues?.getOrNull(1)?.trim() ?: "Invalid email or password"
+                Result.failure(Exception(errorMsg))
             }
         } catch (e: Exception) {
             Result.failure(e)
@@ -143,6 +158,45 @@ object ApiClient {
             val formBody = params.entries.joinToString("&") {
                 "${java.net.URLEncoder.encode(it.key, "UTF-8")}=${java.net.URLEncoder.encode(it.value, "UTF-8")}"
             }
+
+            val regClient = client.newBuilder()
+                .followRedirects(false)
+                .followSslRedirects(false)
+                .build()
+
+            val response = regClient.newCall(
+                okhttp3.Request.Builder()
+                    .url("${BASE_URL}register.php")
+                    .post(formBody.toString().toRequestBody(FORM_MEDIA))
+                    .addHeader("X-Requested-With", "XMLHttpRequest")
+                    .build()
+            ).execute()
+
+            val code = response.code
+            val location = response.header("Location")
+
+            if (code in 300..399 && location != null) {
+                val json = org.json.JSONObject().apply { put("success", true) }
+                sessionManager.isLoggedIn = true
+                sessionManager.userName = name
+                sessionManager.userEmail = email
+                val userJson = org.json.JSONObject().apply { put("name", name); put("email", email) }
+                json.put("user", userJson)
+                Result.success(json)
+            } else {
+                val body = response.body?.string() ?: ""
+                val errorMatch = Regex("""alert-error[^>]*>\s*([^<]+)""").find(body)
+                val errorsMatch = Regex("""<li>([^<]+)</li>""").findAll(body)
+                val errorList = errorsMatch.map { it.groupValues[1] }.toList()
+                val errorMsg = if (errorList.isNotEmpty()) errorList.joinToString("\n")
+                    else errorMatch?.groupValues?.getOrNull(1)?.trim()
+                    ?: "Registration failed"
+                Result.failure(Exception(errorMsg))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
 
             val response = client.newCall(
                 okhttp3.Request.Builder()
