@@ -242,6 +242,40 @@ object ApiClient {
             .trim()
     }
 
+    private fun isLoginPage(body: String): Boolean {
+        return body.contains("name=\"password\"") &&
+            body.contains("login", ignoreCase = true) &&
+            body.contains("register.php", ignoreCase = true)
+    }
+
+    private fun extractProfileName(body: String): String? {
+        val headingMatch = Regex("""<h[12][^>]*>\s*([^<]+)\s*</h[12]>""")
+            .find(body, 500)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.stripHtml()
+        if (!headingMatch.isNullOrBlank() && !headingMatch.contains("MZ Blood Bridge", ignoreCase = true)) {
+            return headingMatch
+        }
+
+        val labelMatch = Regex("""(?:Name|Full Name)\s*</[^>]+>\s*<[^>]+>\s*([^<]+)""", RegexOption.IGNORE_CASE)
+            .find(body)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.stripHtml()
+        return labelMatch?.takeIf { it.isNotBlank() }
+    }
+
+    private fun userJson(email: String, name: String? = null, phone: String? = null): org.json.JSONObject {
+        return org.json.JSONObject().apply {
+            put("id", sessionManager.userId)
+            put("email", email)
+            put("name", name?.takeIf { it.isNotBlank() } ?: email.substringBefore("@"))
+            phone?.takeIf { it.isNotBlank() }?.let { put("phone", it) }
+            put("role", sessionManager.userRole ?: "user")
+        }
+    }
+
     suspend fun login(email: String, password: String): Result<org.json.JSONObject> {
         return try {
             initSession()
@@ -249,7 +283,8 @@ object ApiClient {
             val formBody = encodeForm(
                 listOf(
                     "email" to email,
-                    "password" to password
+                    "password" to password,
+                    "remember" to "on"
                 )
             )
 
@@ -270,11 +305,6 @@ object ApiClient {
             val location = response.header("Location")
 
             if (code in 300..399 && location != null) {
-                // Redirect = login success
-                sessionManager.isLoggedIn = true
-                sessionManager.userEmail = email
-
-                // Fetch profile to get user name
                 val profileResp = client.newCall(
                     okhttp3.Request.Builder()
                         .url("${BASE_URL}profile.php")
@@ -282,16 +312,17 @@ object ApiClient {
                         .build()
                 ).execute()
                 val profileBody = profileResp.body?.string() ?: ""
-                val nameMatch = Regex("""<h[12][^>]*>\s*([^<]+)\s*</h[12]>""").find(profileBody, 500)
-                val userName = nameMatch?.groupValues?.getOrNull(1)?.trim()
+                if (profileResp.code in 300..399 || isLoginPage(profileBody)) {
+                    return Result.failure(Exception("Login session could not be verified"))
+                }
 
-                val json = org.json.JSONObject().apply {
-                    put("success", true)
-                }
-                val userJson = org.json.JSONObject().apply {
-                    put("email", email)
-                    userName?.let { put("name", it); sessionManager.userName = it }
-                }
+                val userName = extractProfileName(profileBody)
+                sessionManager.userEmail = email
+                userName?.let { sessionManager.userName = it }
+                sessionManager.isLoggedIn = true
+
+                val json = org.json.JSONObject().apply { put("success", true) }
+                val userJson = userJson(email, userName)
                 json.put("user", userJson)
                 Result.success(json)
             } else {
@@ -353,7 +384,7 @@ object ApiClient {
                 sessionManager.isLoggedIn = true
                 sessionManager.userName = name
                 sessionManager.userEmail = email
-                val userJson = org.json.JSONObject().apply { put("name", name); put("email", email) }
+                val userJson = userJson(email, name, phone)
                 json.put("user", userJson)
                 Result.success(json)
             } else {

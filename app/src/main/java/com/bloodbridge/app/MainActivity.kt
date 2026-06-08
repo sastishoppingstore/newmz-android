@@ -58,15 +58,9 @@ fun AppNavigation(repository: BloodBridgeRepository) {
         composable(NavRoutes.SPLASH) {
             SplashScreen(
                 repository = repository,
-                onNavigate = { isLoggedIn ->
-                    if (isLoggedIn) {
-                        navController.navigate(NavRoutes.MAIN) {
-                            popUpTo(NavRoutes.SPLASH) { inclusive = true }
-                        }
-                    } else {
-                        navController.navigate(NavRoutes.LOGIN) {
-                            popUpTo(NavRoutes.SPLASH) { inclusive = true }
-                        }
+                onNavigate = {
+                    navController.navigate(NavRoutes.MAIN) {
+                        popUpTo(NavRoutes.SPLASH) { inclusive = true }
                     }
                 }
             )
@@ -97,23 +91,43 @@ fun AppNavigation(repository: BloodBridgeRepository) {
         }
 
         composable(NavRoutes.MAIN) {
+            val requireLogin = {
+                navController.navigate(NavRoutes.LOGIN)
+            }
             MainScreen(
                 repository = repository,
-                onNavigateToCreatePost = { navController.navigate(NavRoutes.CREATE_POST) },
-                onNavigateToComments = { postId -> navController.navigate(NavRoutes.comments(postId)) },
+                onNavigateToCreatePost = {
+                    if (repository.sessionManager.isLoggedIn) navController.navigate(NavRoutes.CREATE_POST)
+                    else requireLogin()
+                },
+                onNavigateToComments = { postId ->
+                    if (repository.sessionManager.isLoggedIn) navController.navigate(NavRoutes.comments(postId))
+                    else requireLogin()
+                },
                 onNavigateToProfile = { userId -> navController.navigate(NavRoutes.otherProfile(userId)) },
-                onNavigateToEmergencyForm = { navController.navigate(NavRoutes.EMERGENCY_FORM) },
+                onNavigateToEmergencyForm = {
+                    if (repository.sessionManager.isLoggedIn) navController.navigate(NavRoutes.EMERGENCY_FORM)
+                    else requireLogin()
+                },
                 onNavigateToChat = { chatId, chatName ->
-                    navController.navigate(NavRoutes.chat(chatId, chatName))
+                    if (repository.sessionManager.isLoggedIn) navController.navigate(NavRoutes.chat(chatId, chatName))
+                    else requireLogin()
                 },
                 onNavigateToDonorProfile = { donorId ->
                     navController.navigate(NavRoutes.donorProfile(donorId))
                 },
-                onNavigateToSettings = { navController.navigate(NavRoutes.SETTINGS) },
-                onNavigateToNotifications = { navController.navigate(NavRoutes.NOTIFICATIONS) },
+                onNavigateToSettings = {
+                    if (repository.sessionManager.isLoggedIn) navController.navigate(NavRoutes.SETTINGS)
+                    else requireLogin()
+                },
+                onNavigateToNotifications = {
+                    if (repository.sessionManager.isLoggedIn) navController.navigate(NavRoutes.NOTIFICATIONS)
+                    else requireLogin()
+                },
                 onNavigateToSearch = { navController.navigate(NavRoutes.SEARCH_SCREEN) },
+                onRequireLogin = requireLogin,
                 onLogout = {
-                    navController.navigate(NavRoutes.LOGIN) {
+                    navController.navigate(NavRoutes.MAIN) {
                         popUpTo(0) { inclusive = true }
                     }
                 }

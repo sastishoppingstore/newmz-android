@@ -34,6 +34,7 @@ fun MainScreen(
     onNavigateToSettings: () -> Unit,
     onNavigateToNotifications: () -> Unit,
     onNavigateToSearch: () -> Unit,
+    onRequireLogin: () -> Unit,
     onLogout: () -> Unit
 ) {
     val items = listOf(
@@ -45,6 +46,7 @@ fun MainScreen(
     )
 
     var selectedIndex by remember { mutableIntStateOf(0) }
+    val isLoggedIn = repository.sessionManager.isLoggedIn
 
     Scaffold(
         bottomBar = {
@@ -52,7 +54,13 @@ fun MainScreen(
                 items.forEachIndexed { index, item ->
                     NavigationBarItem(
                         selected = selectedIndex == index,
-                        onClick = { selectedIndex = index },
+                        onClick = {
+                            if (!isLoggedIn && item.route in setOf("chat", "profile")) {
+                                onRequireLogin()
+                            } else {
+                                selectedIndex = index
+                            }
+                        },
                         icon = {
                             Icon(
                                 if (selectedIndex == index) item.icon else item.icon,
