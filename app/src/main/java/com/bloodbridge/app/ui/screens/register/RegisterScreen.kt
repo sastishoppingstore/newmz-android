@@ -61,6 +61,14 @@ fun RegisterScreen(
             errorMessage = "Please fill all required fields"
             return
         }
+        if (bloodGroup.isBlank()) {
+            errorMessage = "Please select a blood group"
+            return
+        }
+        if (city.isBlank()) {
+            errorMessage = "Please enter your city"
+            return
+        }
         if (password != confirmPassword) {
             errorMessage = "Passwords do not match"
             return

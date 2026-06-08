@@ -12,8 +12,10 @@ import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.logging.HttpLoggingInterceptor
 import java.io.File
+import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import java.util.Locale
 
 object ApiClient {
     const val BASE_URL = "https://mzbloodbridge.pk/"
@@ -22,6 +24,107 @@ object ApiClient {
 
     private val cookieStore = ConcurrentHashMap<String, List<Cookie>>()
     lateinit var sessionManager: SessionManager
+
+    private val bloodGroupIds = mapOf(
+        "A+" to "1",
+        "A-" to "2",
+        "B+" to "3",
+        "B-" to "4",
+        "AB+" to "5",
+        "AB-" to "6",
+        "O+" to "7",
+        "O-" to "8"
+    )
+
+    private val cityIds = mapOf(
+        "abbottabad" to "52",
+        "astore" to "85",
+        "attock" to "47",
+        "badin" to "17",
+        "bahawalpur" to "29",
+        "bannu" to "56",
+        "batkhela" to "63",
+        "bhakkar" to "44",
+        "bhimber" to "78",
+        "chakwal" to "48",
+        "chaman" to "68",
+        "charsadda" to "58",
+        "chilas" to "83",
+        "chiniot" to "41",
+        "dadu" to "16",
+        "dera ghazi khan" to "45",
+        "dera ismail khan" to "57",
+        "dhamke" to "86",
+        "faisalabad" to "5",
+        "ghizer" to "84",
+        "ghotki" to "24",
+        "gilgit" to "80",
+        "gujranwala" to "9",
+        "gujrat" to "27",
+        "gwadar" to "65",
+        "hafizabad" to "39",
+        "haripur" to "62",
+        "hub" to "69",
+        "hunza" to "82",
+        "hyderabad" to "10",
+        "islamabad" to "3",
+        "jacobabad" to "19",
+        "jhang" to "35",
+        "jhelum" to "49",
+        "karachi" to "1",
+        "kashmore" to "25",
+        "kasur" to "37",
+        "khairpur" to "23",
+        "khanewal" to "36",
+        "khushab" to "87",
+        "khuzdar" to "67",
+        "kohat" to "55",
+        "kotli" to "77",
+        "lahore" to "2",
+        "larkana" to "12",
+        "layyah" to "43",
+        "loralai" to "72",
+        "mandi bahauddin" to "38",
+        "mansehra" to "61",
+        "mardan" to "53",
+        "mianwali" to "50",
+        "mirpur" to "75",
+        "mirpur khas" to "14",
+        "multan" to "6",
+        "muzaffarabad" to "74",
+        "muzaffargarh" to "42",
+        "narowal" to "40",
+        "nawabshah" to "13",
+        "nowshera" to "59",
+        "nushki" to "73",
+        "okara" to "33",
+        "pakpattan" to "51",
+        "palandri" to "79",
+        "peshawar" to "7",
+        "quetta" to "8",
+        "rahim yar khan" to "31",
+        "rajhanpur" to "46",
+        "rawalakot" to "76",
+        "rawalpindi" to "4",
+        "sahiwal" to "32",
+        "sargodha" to "30",
+        "sheikhupura" to "28",
+        "shikarpur" to "18",
+        "sialkot" to "26",
+        "sibi" to "71",
+        "skardu" to "81",
+        "sukkur" to "11",
+        "swabi" to "60",
+        "swat" to "54",
+        "tando allahyar" to "20",
+        "tando muhammad khan" to "21",
+        "thatta" to "15",
+        "timergara" to "64",
+        "turbat" to "66",
+        "umerkot" to "22",
+        "vehari" to "34",
+        "zhob" to "70"
+    )
 
     val client: OkHttpClient by lazy {
         val logging = HttpLoggingInterceptor().apply {
@@ -79,13 +182,76 @@ object ApiClient {
         } catch (_: Exception) {}
     }
 
+    private fun encodeForm(params: List<Pair<String, String>>): RequestBody {
+        return params.joinToString("&") { (key, value) ->
+            "${URLEncoder.encode(key, "UTF-8")}=${URLEncoder.encode(value, "UTF-8")}"
+        }.toRequestBody(FORM_MEDIA)
+    }
+
+    private fun lookupKey(value: String): String {
+        return value.trim().lowercase(Locale.ROOT).replace(Regex("\\s+"), " ")
+    }
+
+    private fun normalizeBloodGroup(value: String): String? {
+        val trimmed = value.trim()
+        if (trimmed.isEmpty()) return null
+        if (trimmed in bloodGroupIds.values) return trimmed
+        return bloodGroupIds[trimmed.uppercase(Locale.ROOT)]
+    }
+
+    private fun cityParams(city: String): List<Pair<String, String>> {
+        val trimmed = city.trim()
+        if (trimmed.isEmpty()) return emptyList()
+        if (trimmed.all { it.isDigit() }) {
+            return listOf("city" to trimmed, "city_new" to "")
+        }
+
+        val existingCityId = cityIds[lookupKey(trimmed)]
+        return if (existingCityId != null) {
+            listOf("city" to existingCityId, "city_new" to "")
+        } else {
+            listOf("city" to "", "city_new" to trimmed)
+        }
+    }
+
+    private fun extractErrorMessage(body: String, fallback: String): String {
+        val listErrors = Regex("""<li[^>]*>(.*?)</li>""", RegexOption.DOT_MATCHES_ALL)
+            .findAll(body)
+            .map { it.groupValues[1].stripHtml() }
+            .filter { it.isNotBlank() }
+            .toList()
+        if (listErrors.isNotEmpty()) return listErrors.joinToString("\n")
+
+        val alertMatch = Regex(
+            """<div[^>]*class=["'][^"']*alert-error[^"']*["'][^>]*>(.*?)</div>""",
+            RegexOption.DOT_MATCHES_ALL
+        ).find(body)
+        val alertMessage = alertMatch?.groupValues?.getOrNull(1)?.stripHtml()
+        return alertMessage?.takeIf { it.isNotBlank() } ?: fallback
+    }
+
+    private fun String.stripHtml(): String {
+        return replace(Regex("<[^>]+>"), " ")
+            .replace("&nbsp;", " ")
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&#039;", "'")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+
     suspend fun login(email: String, password: String): Result<org.json.JSONObject> {
         return try {
             initSession()
 
-            val formBody = StringBuilder()
-            formBody.append("email=${java.net.URLEncoder.encode(email, "UTF-8")}")
-            formBody.append("&password=${java.net.URLEncoder.encode(password, "UTF-8")}")
+            val formBody = encodeForm(
+                listOf(
+                    "email" to email,
+                    "password" to password
+                )
+            )
 
             val loginClient = client.newBuilder()
                 .followRedirects(false)
@@ -95,7 +261,7 @@ object ApiClient {
             val response = loginClient.newCall(
                 okhttp3.Request.Builder()
                     .url("${BASE_URL}login.php")
-                    .post(formBody.toString().toRequestBody(FORM_MEDIA))
+                    .post(formBody)
                     .addHeader("X-Requested-With", "XMLHttpRequest")
                     .build()
             ).execute()
@@ -130,9 +296,7 @@ object ApiClient {
                 Result.success(json)
             } else {
                 val body = response.body?.string() ?: ""
-                val errorMatch = Regex("""alert-error[^>]*>\s*([^<]+)""").find(body)
-                val errorMsg = errorMatch?.groupValues?.getOrNull(1)?.trim() ?: "Invalid email or password"
-                Result.failure(Exception(errorMsg))
+                Result.failure(Exception(extractErrorMessage(body, "Invalid email or password")))
             }
         } catch (e: Exception) {
             Result.failure(e)
@@ -147,17 +311,26 @@ object ApiClient {
         return try {
             initSession()
 
-            val params = mutableMapOf(
-                "name" to name, "email" to email, "password" to password,
-                "confirm_password" to confirmPassword, "phone" to phone,
-                "blood_group" to bloodGroup, "city" to city, "cnic" to cnic,
-                "gender" to gender, "dob" to dob
-            )
-            if (referralCode.isNotEmpty()) params["referral_code"] = referralCode
-
-            val formBody = params.entries.joinToString("&") {
-                "${java.net.URLEncoder.encode(it.key, "UTF-8")}=${java.net.URLEncoder.encode(it.value, "UTF-8")}"
+            val serverBloodGroup = normalizeBloodGroup(bloodGroup)
+                ?: return Result.failure(Exception("Please select a blood group"))
+            val serverCityParams = cityParams(city)
+            if (serverCityParams.isEmpty()) {
+                return Result.failure(Exception("Please enter your city"))
             }
+
+            val params = mutableListOf(
+                "name" to name,
+                "email" to email,
+                "phone" to phone,
+                "password" to password,
+                "confirm_password" to confirmPassword,
+                "blood_group" to serverBloodGroup
+            )
+            params.addAll(serverCityParams)
+            params.add("cnic" to cnic)
+            params.add("gender" to gender)
+            params.add("dob" to dob)
+            if (referralCode.isNotEmpty()) params.add("referral_code" to referralCode)
 
             val regClient = client.newBuilder()
                 .followRedirects(false)
@@ -167,7 +340,7 @@ object ApiClient {
             val response = regClient.newCall(
                 okhttp3.Request.Builder()
                     .url("${BASE_URL}register.php")
-                    .post(formBody.toString().toRequestBody(FORM_MEDIA))
+                    .post(encodeForm(params))
                     .addHeader("X-Requested-With", "XMLHttpRequest")
                     .build()
             ).execute()
@@ -185,13 +358,7 @@ object ApiClient {
                 Result.success(json)
             } else {
                 val body = response.body?.string() ?: ""
-                val errorMatch = Regex("""alert-error[^>]*>\s*([^<]+)""").find(body)
-                val errorsMatch = Regex("""<li>([^<]+)</li>""").findAll(body)
-                val errorList = errorsMatch.map { it.groupValues[1] }.toList()
-                val errorMsg = if (errorList.isNotEmpty()) errorList.joinToString("\n")
-                    else errorMatch?.groupValues?.getOrNull(1)?.trim()
-                    ?: "Registration failed"
-                Result.failure(Exception(errorMsg))
+                Result.failure(Exception(extractErrorMessage(body, "Registration failed")))
             }
         } catch (e: Exception) {
             Result.failure(e)
